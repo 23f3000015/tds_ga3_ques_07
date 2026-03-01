@@ -11,7 +11,7 @@ import yt_dlp
 app = FastAPI()
 
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = "https://api.aipipe.org/v1/chat/completions"  # OpenAI compatible endpoint
+AI_PIPE_URL = "https://api.aipipe.ai/v1/chat/completions"  # OpenAI compatible endpoint
 
 
 class AskRequest(BaseModel):

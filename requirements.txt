@@ -1,3 +1,5 @@
 fastapi
 uvicorn
-requests
+yt-dlp
+google-generativeai
+python-multipart

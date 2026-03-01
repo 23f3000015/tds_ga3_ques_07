@@ -9,7 +9,6 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Enable CORS (safe)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,13 +36,20 @@ def health():
 
 def normalize(text: str) -> str:
     text = text.lower()
-    text = text.replace("\n", " ")
     text = text.translate(str.maketrans("", "", string.punctuation))
     text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
-def get_captions(video_url: str) -> str:
+def seconds_to_hhmmss(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
+
+
+def get_caption_entries(video_url: str):
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
@@ -56,7 +62,6 @@ def get_captions(video_url: str) -> str:
     if not subtitles:
         raise Exception("No subtitles available")
 
-    # Prefer English
     if "en" in subtitles:
         subtitle_url = subtitles["en"][0]["url"]
     else:
@@ -67,12 +72,10 @@ def get_captions(video_url: str) -> str:
     if response.status_code != 200:
         raise Exception("Failed to fetch subtitles")
 
-    return response.text
+    vtt = response.text
+    blocks = vtt.split("\n\n")
 
-
-def parse_vtt(vtt_text: str, topic: str) -> str:
-    blocks = vtt_text.split("\n\n")
-    normalized_topic = normalize(topic)
+    entries = []
 
     for block in blocks:
         lines = block.split("\n")
@@ -82,23 +85,52 @@ def parse_vtt(vtt_text: str, topic: str) -> str:
         timestamp_line = lines[0]
         caption_text = " ".join(lines[1:])
 
-        normalized_caption = normalize(caption_text)
+        start = timestamp_line.split(" --> ")[0]
+        start = start.split(".")[0]
 
-        if normalized_topic in normalized_caption:
-            start = timestamp_line.split(" --> ")[0]
-            start = start.split(".")[0]
+        if re.match(r"^\d{2}:\d{2}:\d{2}$", start):
+            entries.append({
+                "time": start,
+                "text": normalize(caption_text)
+            })
 
-            if re.match(r"^\d{2}:\d{2}:\d{2}$", start):
-                return start
+    return entries
 
-    raise Exception("Topic not found")
+
+def find_phrase(entries, topic):
+    normalized_topic = normalize(topic)
+
+    # Combine sliding window across captions
+    combined_text = ""
+    time_map = []
+
+    for entry in entries:
+        combined_text += " " + entry["text"]
+        time_map.append(entry["time"])
+
+    combined_text = combined_text.strip()
+
+    index = combined_text.find(normalized_topic)
+    if index == -1:
+        raise Exception("Topic not found")
+
+    # Estimate which caption index this corresponds to
+    word_position = len(combined_text[:index].split())
+
+    word_count = 0
+    for i, entry in enumerate(entries):
+        word_count += len(entry["text"].split())
+        if word_count >= word_position:
+            return entry["time"]
+
+    raise Exception("Timestamp not resolved")
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest):
     try:
-        captions = get_captions(request.video_url)
-        timestamp = parse_vtt(captions, request.topic)
+        entries = get_caption_entries(request.video_url)
+        timestamp = find_phrase(entries, request.topic)
 
         return AskResponse(
             timestamp=timestamp,
@@ -110,7 +142,6 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Railway dynamic port
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

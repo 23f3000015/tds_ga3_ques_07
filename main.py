@@ -1,13 +1,20 @@
 import os
 import re
-import requests
+import time
+import json
+import tempfile
+import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import google.generativeai as genai
+
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = FastAPI()
 
-# Allow CORS
+# CORS (safe for validator)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,9 +22,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = "https://aipipe.org/openrouter/v1/chat/completions"
 
 
 class AskRequest(BaseModel):
@@ -36,54 +40,107 @@ def health():
     return {"status": "alive"}
 
 
+def download_audio(video_url: str) -> str:
+    temp_dir = tempfile.mkdtemp()
+    output_path = os.path.join(temp_dir, "audio.%(ext)s")
+
+    ydl_opts = {
+        "format": "bestaudio[ext=m4a]/bestaudio",
+        "outtmpl": output_path,
+        "quiet": True,
+        "noplaylist": True,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+
+    # Find downloaded file
+    for file in os.listdir(temp_dir):
+        if file.endswith(".m4a") or file.endswith(".webm"):
+            return os.path.join(temp_dir, file)
+
+    raise Exception("Audio download failed")
+
+
+def wait_until_active(file):
+    while True:
+        file = genai.get_file(file.name)
+        if file.state.name == "ACTIVE":
+            return file
+        if file.state.name == "FAILED":
+            raise Exception("File processing failed")
+        time.sleep(2)
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest):
+    audio_path = None
+
     try:
-        if not AI_PIPE_TOKEN:
-            raise Exception("AI_PIPE_TOKEN not set")
+        if not os.getenv("GEMINI_API_KEY"):
+            raise Exception("GEMINI_API_KEY not set")
+
+        # 1️⃣ Download audio only
+        audio_path = download_audio(request.video_url)
+
+        # 2️⃣ Upload to Gemini Files API
+        uploaded_file = genai.upload_file(audio_path)
+
+        # 3️⃣ Wait until file becomes ACTIVE
+        uploaded_file = wait_until_active(uploaded_file)
+
+        # 4️⃣ Use structured output schema
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-pro",
+            generation_config={
+                "response_mime_type": "application/json",
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "timestamp": {
+                            "type": "string",
+                            "pattern": "^[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+                        }
+                    },
+                    "required": ["timestamp"]
+                },
+            },
+        )
 
         prompt = f"""
-        In the YouTube video {request.video_url},
-        at what timestamp (HH:MM:SS) is the topic
-        "{request.topic}" first discussed?
+        Analyze the uploaded audio file.
+        Find the FIRST moment the following exact phrase appears:
 
-        Return ONLY the timestamp in HH:MM:SS format.
+        "{request.topic}"
+
+        Return ONLY JSON:
+        {{
+          "timestamp": "HH:MM:SS"
+        }}
+
+        Ensure the timestamp is the exact first spoken occurrence.
         """
 
-        headers = {
-            "Authorization": f"Bearer {AI_PIPE_TOKEN}",
-            "Content-Type": "application/json",
-        }
+        response = model.generate_content([uploaded_file, prompt])
 
-        payload = {
-            "model": "openai/gpt-4.1-nano",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
+        parsed = json.loads(response.text)
+        timestamp = parsed["timestamp"]
 
-        response = requests.post(AI_PIPE_URL, headers=headers, json=payload)
-
-        if response.status_code != 200:
-            raise Exception(response.text)
-
-        content = response.json()["choices"][0]["message"]["content"].strip()
-
-        # Extract HH:MM:SS safely
-        match = re.search(r"\d{2}:\d{2}:\d{2}", content)
-        if not match:
+        if not re.match(r"^\d{2}:\d{2}:\d{2}$", timestamp):
             raise Exception("Invalid timestamp format")
-
-        timestamp = match.group(0)
 
         return AskResponse(
             timestamp=timestamp,
             video_url=request.video_url,
-            topic=request.topic
+            topic=request.topic,
         )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
 
 
 if __name__ == "__main__":

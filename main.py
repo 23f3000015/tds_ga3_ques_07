@@ -37,8 +37,7 @@ def download_transcript(video_url: str) -> str:
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(video_url, download=False)
-        ydl.download([video_url])
+        ydl.extract_info(video_url, download=True)
 
     # Find .vtt subtitle file
     for file in os.listdir(temp_dir):
@@ -60,7 +59,6 @@ def extract_timestamp(vtt_text: str, topic: str) -> str:
                 start_time = timestamp_line.split(" --> ")[0]
                 hhmmss = start_time.split(".")[0]
 
-                # Ensure HH:MM:SS format
                 if re.match(r"^\d{2}:\d{2}:\d{2}$", hhmmss):
                     return hhmmss
 
@@ -81,3 +79,10 @@ def ask(request: AskRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# 🚀 Railway Dynamic Port Binding
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

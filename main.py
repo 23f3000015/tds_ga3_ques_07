@@ -1,13 +1,13 @@
 import os
 import re
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
-# Enable CORS (safe for validator)
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,6 +15,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 class AskRequest(BaseModel):
@@ -33,47 +36,53 @@ def health():
     return {"status": "alive"}
 
 
-def extract_video_id(url: str) -> str:
-    if "youtu.be/" in url:
-        return url.split("youtu.be/")[1].split("?")[0]
-    if "watch?v=" in url:
-        return url.split("watch?v=")[1].split("&")[0]
-    raise Exception("Invalid YouTube URL")
-
-
-def seconds_to_hhmmss(seconds: float) -> str:
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02}:{m:02}:{s:02}"
-
-
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest):
     try:
-        video_id = extract_video_id(request.video_url)
+        prompt = f"""
+        A user wants to know when the topic "{request.topic}" is first discussed
+        in the YouTube video: {request.video_url}
 
-        api = YouTubeTranscriptApi()
-        transcript = api.fetch(video_id)
+        Return ONLY the timestamp in HH:MM:SS format.
+        If unsure, give your best estimate.
+        """
 
-        for entry in transcript:
-            if request.topic.lower() in entry.text.lower():
-                timestamp = seconds_to_hhmmss(entry.start)
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-                return AskResponse(
-                    timestamp=timestamp,
-                    video_url=request.video_url,
-                    topic=request.topic,
-                )
+        payload = {
+            "model": "openai/gpt-4o-mini",
+            "messages": [
+                {"role": "user", "content": prompt}
+            ]
+        }
 
-        raise Exception("Topic not found in transcript")
+        response = requests.post(OPENROUTER_URL, headers=headers, json=payload)
+
+        if response.status_code != 200:
+            raise Exception(response.text)
+
+        content = response.json()["choices"][0]["message"]["content"].strip()
+
+        # Extract HH:MM:SS
+        match = re.search(r"\d{2}:\d{2}:\d{2}", content)
+        if not match:
+            raise Exception("Invalid timestamp format")
+
+        timestamp = match.group(0)
+
+        return AskResponse(
+            timestamp=timestamp,
+            video_url=request.video_url,
+            topic=request.topic
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Railway dynamic port binding
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

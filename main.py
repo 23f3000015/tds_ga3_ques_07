@@ -2,10 +2,20 @@ import os
 import re
 import tempfile
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import yt_dlp
 
 app = FastAPI()
+
+# ✅ Allow all CORS (safe for assignment API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class AskRequest(BaseModel):
@@ -39,7 +49,7 @@ def download_transcript(video_url: str) -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(video_url, download=True)
 
-    # Find .vtt subtitle file
+    # Find subtitle file
     for file in os.listdir(temp_dir):
         if file.endswith(".vtt"):
             with open(os.path.join(temp_dir, file), "r", encoding="utf-8") as f:
@@ -81,7 +91,7 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# 🚀 Railway Dynamic Port Binding
+# ✅ Railway dynamic port binding
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

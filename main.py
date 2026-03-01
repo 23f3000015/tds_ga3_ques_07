@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import json
 import tempfile
 import requests
@@ -11,7 +10,7 @@ import yt_dlp
 app = FastAPI()
 
 AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
-AI_PIPE_URL = "https://aipipe.org/geminiv1beta/models/gemini-1.5-flash:generateContent"  # OpenAI compatible endpoint
+AI_PIPE_URL = "https://aipipe.org/geminiv1beta/models/gemini-1.5-flash:generateContent"
 
 
 class AskRequest(BaseModel):
@@ -25,28 +24,45 @@ class AskResponse(BaseModel):
     topic: str
 
 
-def download_audio(video_url: str) -> str:
+def download_transcript(video_url: str) -> str:
     temp_dir = tempfile.mkdtemp()
-    output_path = os.path.join(temp_dir, "audio.%(ext)s")
 
     ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": output_path,
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en"],
+        "outtmpl": os.path.join(temp_dir, "%(id)s"),
         "quiet": True,
-        "no_warnings": True,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=False)
         ydl.download([video_url])
+        video_id = info["id"]
 
-    return os.path.join(temp_dir, "audio.mp3")
+    # find subtitle file
+    for file in os.listdir(temp_dir):
+        if file.endswith(".vtt"):
+            with open(os.path.join(temp_dir, file), "r", encoding="utf-8") as f:
+                return f.read()
+
+    raise Exception("Transcript not available")
+
+
+def extract_first_timestamp_from_vtt(vtt_text, topic):
+    blocks = vtt_text.split("\n\n")
+
+    for block in blocks:
+        if topic.lower() in block.lower():
+            lines = block.split("\n")
+            if len(lines) >= 2:
+                timestamp_line = lines[0]
+                start_time = timestamp_line.split(" --> ")[0]
+                hhmmss = start_time.split(".")[0]
+                return hhmmss
+
+    return None
 
 
 @app.post("/ask", response_model=AskResponse)
@@ -55,53 +71,60 @@ def ask(request: AskRequest):
     if not AI_PIPE_TOKEN:
         raise HTTPException(status_code=500, detail="AI_PIPE_TOKEN not set")
 
-    audio_path = None
-
     try:
-        # 1️⃣ Download audio
-        audio_path = download_audio(request.video_url)
+        # 1️⃣ Get transcript
+        transcript = download_transcript(request.video_url)
 
-        # 2️⃣ Prepare prompt
+        # 2️⃣ Try direct match first (fast)
+        direct_timestamp = extract_first_timestamp_from_vtt(transcript, request.topic)
+        if direct_timestamp:
+            return AskResponse(
+                timestamp=direct_timestamp,
+                video_url=request.video_url,
+                topic=request.topic,
+            )
+
+        # 3️⃣ If not found, ask Gemini
         prompt = f"""
-        Analyze the provided audio file.
-        Find the FIRST timestamp where the topic "{request.topic}" is spoken.
+        Below is a YouTube transcript.
 
-        Return ONLY valid JSON in this format:
+        Find the FIRST timestamp where the topic "{request.topic}" is mentioned.
+
+        Return ONLY JSON:
         {{
             "timestamp": "HH:MM:SS"
         }}
 
-        The timestamp MUST be in HH:MM:SS format.
+        Transcript:
+        {transcript[:12000]}
         """
 
         headers = {
             "Authorization": f"Bearer {AI_PIPE_TOKEN}",
+            "Content-Type": "application/json",
         }
 
-        files = {
-            "file": open(audio_path, "rb"),
-        }
-
-        data = {
-            "model": "gemini-1.5-pro",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt}
+                    ]
+                }
+            ]
         }
 
         response = requests.post(
             AI_PIPE_URL,
             headers=headers,
-            data={"payload": json.dumps(data)},
-            files=files,
+            json=payload
         )
 
         if response.status_code != 200:
             raise Exception(response.text)
 
         result = response.json()
-
-        content = result["choices"][0]["message"]["content"]
+        content = result["candidates"][0]["content"]["parts"][0]["text"]
 
         parsed = json.loads(content)
         timestamp = parsed["timestamp"]
@@ -117,7 +140,3 @@ def ask(request: AskRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-    finally:
-        if audio_path and os.path.exists(audio_path):
-            os.remove(audio_path)

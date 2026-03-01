@@ -7,7 +7,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS (safe for validator)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,11 +54,12 @@ def ask(request: AskRequest):
     try:
         video_id = extract_video_id(request.video_url)
 
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
 
         for entry in transcript:
-            if request.topic.lower() in entry["text"].lower():
-                timestamp = seconds_to_hhmmss(entry["start"])
+            if request.topic.lower() in entry.text.lower():
+                timestamp = seconds_to_hhmmss(entry.start)
 
                 return AskResponse(
                     timestamp=timestamp,
@@ -72,7 +73,7 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Railway dynamic port
+# Railway dynamic port binding
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

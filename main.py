@@ -1,5 +1,6 @@
 import os
 import re
+import string
 import requests
 import yt_dlp
 from fastapi import FastAPI, HTTPException
@@ -8,6 +9,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+# Enable CORS (safe)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,19 +35,18 @@ def health():
     return {"status": "alive"}
 
 
-def seconds_to_hhmmss(seconds: float) -> str:
-    seconds = int(seconds)
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-    return f"{h:02}:{m:02}:{s:02}"
+def normalize(text: str) -> str:
+    text = text.lower()
+    text = text.replace("\n", " ")
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
-def get_captions(video_url: str):
+def get_captions(video_url: str) -> str:
     ydl_opts = {
         "quiet": True,
         "skip_download": True,
-        "writeautomaticsub": False,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -63,22 +64,32 @@ def get_captions(video_url: str):
         subtitle_url = subtitles[lang][0]["url"]
 
     response = requests.get(subtitle_url)
+    if response.status_code != 200:
+        raise Exception("Failed to fetch subtitles")
+
     return response.text
 
 
-def parse_vtt(vtt_text: str, topic: str):
+def parse_vtt(vtt_text: str, topic: str) -> str:
     blocks = vtt_text.split("\n\n")
+    normalized_topic = normalize(topic)
 
     for block in blocks:
-        if topic.lower() in block.lower():
-            lines = block.split("\n")
-            if len(lines) >= 2:
-                timestamp_line = lines[0]
-                start = timestamp_line.split(" --> ")[0]
-                start = start.split(".")[0]
+        lines = block.split("\n")
+        if len(lines) < 2:
+            continue
 
-                if re.match(r"^\d{2}:\d{2}:\d{2}$", start):
-                    return start
+        timestamp_line = lines[0]
+        caption_text = " ".join(lines[1:])
+
+        normalized_caption = normalize(caption_text)
+
+        if normalized_topic in normalized_caption:
+            start = timestamp_line.split(" --> ")[0]
+            start = start.split(".")[0]
+
+            if re.match(r"^\d{2}:\d{2}:\d{2}$", start):
+                return start
 
     raise Exception("Topic not found")
 
@@ -99,6 +110,7 @@ def ask(request: AskRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# Railway dynamic port
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 import tempfile
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel

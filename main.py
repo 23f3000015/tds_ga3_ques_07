@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-# Enable CORS
+# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,8 +16,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+AI_PIPE_TOKEN = os.getenv("AI_PIPE_TOKEN")
+AI_PIPE_URL = "https://aipipe.org/openrouter/v1/chat/completions"
 
 
 class AskRequest(BaseModel):
@@ -39,34 +39,37 @@ def health():
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest):
     try:
+        if not AI_PIPE_TOKEN:
+            raise Exception("AI_PIPE_TOKEN not set")
+
         prompt = f"""
-        A user wants to know when the topic "{request.topic}" is first discussed
-        in the YouTube video: {request.video_url}
+        In the YouTube video {request.video_url},
+        at what timestamp (HH:MM:SS) is the topic
+        "{request.topic}" first discussed?
 
         Return ONLY the timestamp in HH:MM:SS format.
-        If unsure, give your best estimate.
         """
 
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
+            "Authorization": f"Bearer {AI_PIPE_TOKEN}",
+            "Content-Type": "application/json",
         }
 
         payload = {
-            "model": "openai/gpt-4o-mini",
+            "model": "openai/gpt-4.1-nano",
             "messages": [
                 {"role": "user", "content": prompt}
             ]
         }
 
-        response = requests.post(OPENROUTER_URL, headers=headers, json=payload)
+        response = requests.post(AI_PIPE_URL, headers=headers, json=payload)
 
         if response.status_code != 200:
             raise Exception(response.text)
 
         content = response.json()["choices"][0]["message"]["content"].strip()
 
-        # Extract HH:MM:SS
+        # Extract HH:MM:SS safely
         match = re.search(r"\d{2}:\d{2}:\d{2}", content)
         if not match:
             raise Exception("Invalid timestamp format")

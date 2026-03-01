@@ -1,14 +1,13 @@
 import os
 import re
-import tempfile
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
-# ✅ Allow all CORS (safe for assignment API)
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -34,64 +33,46 @@ def health():
     return {"status": "alive"}
 
 
-def download_transcript(video_url: str) -> str:
-    temp_dir = tempfile.mkdtemp()
-
-    ydl_opts = {
-        "skip_download": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en"],
-        "outtmpl": os.path.join(temp_dir, "%(id)s"),
-        "quiet": True,
-    }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(video_url, download=True)
-
-    # Find subtitle file
-    for file in os.listdir(temp_dir):
-        if file.endswith(".vtt"):
-            with open(os.path.join(temp_dir, file), "r", encoding="utf-8") as f:
-                return f.read()
-
-    raise Exception("Transcript not available")
+def extract_video_id(url: str) -> str:
+    if "youtu.be/" in url:
+        return url.split("youtu.be/")[1].split("?")[0]
+    if "watch?v=" in url:
+        return url.split("watch?v=")[1].split("&")[0]
+    raise Exception("Invalid YouTube URL")
 
 
-def extract_timestamp(vtt_text: str, topic: str) -> str:
-    blocks = vtt_text.split("\n\n")
-
-    for block in blocks:
-        if topic.lower() in block.lower():
-            lines = block.split("\n")
-            if len(lines) >= 2:
-                timestamp_line = lines[0]
-                start_time = timestamp_line.split(" --> ")[0]
-                hhmmss = start_time.split(".")[0]
-
-                if re.match(r"^\d{2}:\d{2}:\d{2}$", hhmmss):
-                    return hhmmss
-
-    raise Exception("Topic not found in transcript")
+def seconds_to_hhmmss(seconds: float) -> str:
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
 
 
 @app.post("/ask", response_model=AskResponse)
 def ask(request: AskRequest):
     try:
-        transcript = download_transcript(request.video_url)
-        timestamp = extract_timestamp(transcript, request.topic)
+        video_id = extract_video_id(request.video_url)
 
-        return AskResponse(
-            timestamp=timestamp,
-            video_url=request.video_url,
-            topic=request.topic,
-        )
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+
+        for entry in transcript:
+            if request.topic.lower() in entry["text"].lower():
+                timestamp = seconds_to_hhmmss(entry["start"])
+
+                return AskResponse(
+                    timestamp=timestamp,
+                    video_url=request.video_url,
+                    topic=request.topic,
+                )
+
+        raise Exception("Topic not found in transcript")
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ✅ Railway dynamic port binding
+# Railway dynamic port
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
